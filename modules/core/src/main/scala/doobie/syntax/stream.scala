@@ -8,11 +8,17 @@ import doobie.util.compat.=:=
 import doobie.util.transactor.Transactor
 import doobie.free.connection.ConnectionIO
 import cats.data.Kleisli
+import cats.effect.Concurrent
 import cats.effect.kernel.{ Async, MonadCancelThrow }
 import fs2.{ Pipe, Stream }
 
 class StreamOps[F[_], A](fa: Stream[F, A]) {
-  def transact[M[_]: MonadCancelThrow](xa: Transactor[M])(implicit ev: Stream[F, A] =:= Stream[ConnectionIO, A]): Stream[M, A] = xa.transP.apply(fa)
+  // def transact[M[_]: MonadCancelThrow](xa: Transactor[M])(implicit ev: Stream[F, A] =:= Stream[ConnectionIO, A]): Stream[M, A] = xa.transP.apply(fa)
+
+
+  def transact[M[_]: Concurrent](xa: Transactor[M])(implicit
+      ev: Stream[F, A] =:= Stream[ConnectionIO, A],
+  ): Stream[M, A] = xa.transBuffer(1024).apply(fa)
 }
 class KleisliStreamOps[A, B](fa: Stream[Kleisli[ConnectionIO, A, *], B]) {
   def transact[M[_]: MonadCancelThrow](xa: Transactor[M]): Stream[Kleisli[M, A, *], B] = xa.transPK[A].apply(fa)

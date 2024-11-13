@@ -4,17 +4,19 @@
 
 package doobie.util
 
+import cats.data.Kleisli
+import cats.effect.Concurrent
+import cats.effect.kernel.Resource.ExitCase
+import cats.effect.kernel.{Async, MonadCancelThrow, Resource}
+import cats.effect.std.Queue
+import cats.{Monad, ~>}
 import doobie.WeakAsync
-import doobie.free.connection.{ConnectionIO, ConnectionOp, commit, rollback, setAutoCommit, unit}
 import doobie.free.KleisliInterpreter
+import doobie.free.connection.{ConnectionIO, ConnectionOp, commit, rollback, setAutoCommit, unit}
 import doobie.implicits._
 import doobie.util.lens._
 import doobie.util.log.LogHandler
 import doobie.util.yolo.Yolo
-import cats.{Monad, ~>}
-import cats.data.Kleisli
-import cats.effect.kernel.{Async, MonadCancelThrow, Resource}
-import cats.effect.kernel.Resource.ExitCase
 import fs2.{Pipe, Stream}
 
 import java.sql.{Connection, DriverManager}
@@ -180,6 +182,19 @@ object transactor  {
           Stream.resource(connect(kernel)).flatMap { c =>
             Stream.resource(strategy.resource).flatMap(_ => s).translate(run(c))
           }.scope
+      }
+
+    def transBuffer(bufferSize: Int)(implicit ev: Concurrent[M]): Stream[ConnectionIO, *] ~> Stream[M, *] =
+      new (Stream[ConnectionIO, *] ~> Stream[M, *]) {
+        def apply[T](s: Stream[ConnectionIO, T]) = {
+          fs2.Stream.eval(Queue.bounded[M, Option[T]](bufferSize)).flatMap { buffer =>
+            val res = Stream.resource(connect(kernel)).flatMap { c =>
+              Stream.resource(strategy.resource).flatMap(_ => s).translate(run(c))
+                .evalMap(x => buffer.offer(Some(x))) ++ Stream.emit(None).evalMap(buffer.offer)
+            }
+            Stream.fromQueueNoneTerminated(buffer).concurrently(res)
+          }
+        }
       }
 
     def rawTransPK[I](implicit ev: MonadCancelThrow[M]): Stream[Kleisli[ConnectionIO, I, *], *] ~> Stream[Kleisli[M, I, *], *] =

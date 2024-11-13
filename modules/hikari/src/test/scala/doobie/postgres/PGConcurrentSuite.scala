@@ -4,15 +4,15 @@
 
 package doobie.postgres
 
-import java.util.concurrent.Executors
-
 import cats.effect.IO
 import com.zaxxer.hikari.HikariDataSource
-import doobie._
-import doobie.implicits._
+import doobie.*
+import doobie.implicits.*
+import fs2.Stream
 
+import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext
-import scala.concurrent.duration._
+import scala.concurrent.duration.*
 
 class PGConcurrentSuite extends munit.FunSuite {
 
@@ -60,6 +60,36 @@ class PGConcurrentSuite extends munit.FunSuite {
       .drain
 
     assertEquals(pollingStream.unsafeRunSync(), ())
+  }
+
+  test("Connection returned before stream is drained") {
+    val xa = Transactor.fromDataSource[IO](
+      dataSource,
+      ExecutionContext.fromExecutor(Executors.newFixedThreadPool(32))
+    )
+
+    val count = 100
+    val insert = for {
+      _ <- Stream.eval(sql"CREATE TABLE if not exists stream_cancel_test (i text)".update.run.transact(xa))
+      _ <- Stream.eval(sql"truncate table stream_cancel_test".update.run.transact(xa))
+      _ <- Stream.eval(sql"INSERT INTO stream_cancel_test values ('1')".update.run.transact(xa)).repeatN(count)
+    } yield ()
+
+    insert.compile.drain.unsafeRunSync()
+
+    val streamLargerBuffer = fr"select * from stream_cancel_test".query[Int].stream.transact(xa)
+      .evalMap(_ => fr"select 1".query[Int].unique.transact(xa))
+      .compile.count
+
+    assertEquals(streamLargerBuffer.unsafeRunSync(), count.toLong)
+
+    // if buffer is less than result set, it will be still block new connection since the result set is not drained
+    // use sleep to test the result set can be drained
+    val streamSmallerBuffer = fr"select * from stream_cancel_test".query[Int].stream.transact(xa)
+      .evalMap(_ => IO.sleep(10.milliseconds))
+      .compile.count
+
+    assertEquals(streamSmallerBuffer.unsafeRunSync(), count.toLong)
   }
 
 }
